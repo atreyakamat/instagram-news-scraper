@@ -5,7 +5,6 @@ import { run } from './src/orchestrator/index.js';
 import { createLogger } from './src/logger/index.js';
 import { mkdirSync } from 'fs';
 
-// Ensure logs directory exists
 mkdirSync('logs', { recursive: true });
 
 const logger = createLogger('cli');
@@ -13,19 +12,21 @@ const logger = createLogger('cli');
 program
     .name('instagram-news-scraper')
     .description(
-        'Production-grade Instagram scraper with Playwright, Ollama vision, and SQLite storage'
+        'Production-grade Instagram scraper with Playwright, local image downloads, and MySQL storage'
     )
-    .version('2.0.0')
+    .version('3.0.0')
     .requiredOption('--url <url>', 'Platform URL to scrape')
     .option('--start <date>', 'Start date inclusive (YYYY-MM-DD)', '2021-01-01')
     .option('--end <date>', 'End date inclusive (YYYY-MM-DD)', '2025-12-31')
-    .option('--workers <n>', 'Parallel Ollama vision workers', '3')
-    .option('--db <path>', 'SQLite database file path', 'data/scraper.db')
-    .option('--ollama-url <url>', 'Ollama API base URL', 'http://localhost:11434')
-    .option('--ollama-model <model>', 'Ollama vision model name', 'llava')
-    .option('--auth-state <path>', 'Path to Playwright storage state JSON (for authenticated sessions)')
-    .option('--post-selector <sel>', 'Custom CSS selector for post containers')
-    .option('--no-headless', 'Run browser in headed mode (for debugging)')
+    .option('--workers <n>', 'Parallel download workers', '3')
+    .option('--mysql-host <host>', 'MySQL host', 'localhost')
+    .option('--mysql-port <port>', 'MySQL port', '3306')
+    .option('--mysql-user <user>', 'MySQL user', 'root')
+    .option('--mysql-password <pw>', 'MySQL password', '')
+    .option('--mysql-database <db>', 'MySQL database name', 'instagram_clone_archive')
+    .option('--auth-state <path>', 'Playwright storage state JSON path')
+    .option('--post-selector <sel>', 'Custom CSS selector for posts')
+    .option('--no-headless', 'Run browser in headed mode')
     .parse(process.argv);
 
 const opts = program.opts();
@@ -55,12 +56,11 @@ if (isNaN(workers) || workers < 1) {
 }
 
 // ── Banner ────────────────────────────────────────────────────────────────────
-logger.info('Instagram News Scraper v2.0.0 starting...');
+logger.info('Instagram News Scraper v3.0.0 starting...');
 logger.info(`  URL:          ${opts.url}`);
 logger.info(`  Date range:   ${opts.start} → ${opts.end}`);
 logger.info(`  Workers:      ${workers}`);
-logger.info(`  Database:     ${opts.db}`);
-logger.info(`  Ollama:       ${opts.ollamaUrl} (model: ${opts.ollamaModel})`);
+logger.info(`  MySQL:        ${opts.mysqlUser}@${opts.mysqlHost}:${opts.mysqlPort}/${opts.mysqlDatabase}`);
 logger.info(`  Headless:     ${opts.headless}`);
 if (opts.authState) logger.info(`  Auth state:   ${opts.authState}`);
 if (opts.postSelector) logger.info(`  Post selector: ${opts.postSelector}`);
@@ -70,9 +70,13 @@ run({
     url: opts.url,
     startDate,
     endDate,
-    dbPath: opts.db,
-    ollamaUrl: opts.ollamaUrl,
-    ollamaModel: opts.ollamaModel,
+    mysql: {
+        host: opts.mysqlHost,
+        port: parseInt(opts.mysqlPort, 10),
+        user: opts.mysqlUser,
+        password: opts.mysqlPassword,
+        database: opts.mysqlDatabase,
+    },
     workers,
     authStatePath: opts.authState || null,
     headless: opts.headless,

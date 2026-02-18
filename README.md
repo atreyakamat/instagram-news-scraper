@@ -1,153 +1,180 @@
-# Instagram News Scraper
+# Instagram News Scraper v3
 
-A production-grade, fully modular Node.js system for extracting posts from Instagram, processing images locally via **Ollama vision**, and storing structured results in **SQLite** (no database server required).
+Production-grade, fully modular Node.js system for extracting posts from an Instagram-style platform, downloading images locally, and storing structured data in **MySQL**.
 
 ## Prerequisites
 
-| Requirement | Version |
+| Requirement | Notes |
 |---|---|
-| Node.js | ≥ 22.5.0 |
-| Ollama | Running locally with a vision model pulled |
-
-```bash
-# Pull a vision model (choose one)
-ollama pull llava        # recommended, ~4GB
-ollama pull moondream    # lighter, ~1.7GB
-```
+| **Node.js** | ≥ 18.0.0 |
+| **MySQL** | 5.7+ or 8.x running locally or remotely |
+| **Playwright Chromium** | Installed via `npm run install-browsers` |
 
 ## Installation
 
 ```bash
 npm install
-npm run install-browsers   # installs Playwright Chromium
+npm run install-browsers
 ```
 
-## Usage
+## Quick Start
 
 ```bash
-# Basic run (SQLite DB auto-created at data/scraper.db)
-node --experimental-sqlite index.js --url=https://www.instagram.com/username/
-
-# Or use npm start (flag is included automatically)
-npm start -- --url=https://www.instagram.com/username/
+# Ensure MySQL is running, then:
+node index.js \
+  --url=https://www.instagram.com/username/ \
+  --mysql-user=root \
+  --mysql-password=yourpassword
 ```
 
-### All Options
+The database `instagram_clone_archive` and all tables are created automatically on first run.
+
+## CLI Options
 
 | Flag | Default | Description |
 |---|---|---|
 | `--url` | *(required)* | Instagram profile or feed URL |
 | `--start` | `2021-01-01` | Start date inclusive (YYYY-MM-DD) |
 | `--end` | `2025-12-31` | End date inclusive (YYYY-MM-DD) |
-| `--workers` | `3` | Parallel Ollama vision workers |
-| `--db` | `data/scraper.db` | SQLite database file path |
-| `--ollama-url` | `http://localhost:11434` | Ollama API base URL |
-| `--ollama-model` | `llava` | Vision model name |
-| `--auth-state` | *(none)* | Path to Playwright storage state JSON |
-| `--post-selector` | *(auto)* | Custom CSS selector for post containers |
-| `--no-headless` | *(headless)* | Run browser in headed mode (for debugging) |
+| `--workers` | `3` | Parallel download/insert workers |
+| `--mysql-host` | `localhost` | MySQL host |
+| `--mysql-port` | `3306` | MySQL port |
+| `--mysql-user` | `root` | MySQL user |
+| `--mysql-password` | *(empty)* | MySQL password |
+| `--mysql-database` | `instagram_clone_archive` | Database name |
+| `--auth-state` | *(none)* | Playwright storage state JSON |
+| `--post-selector` | *(auto)* | Custom CSS selector for posts |
+| `--no-headless` | *(headless)* | Visible browser for debugging |
 
 ### Examples
 
 ```bash
 # Custom date range
-node --experimental-sqlite index.js --url=https://www.instagram.com/username/ --start=2023-01-01 --end=2023-12-31
+node index.js --url=https://www.instagram.com/username/ --start=2023-01-01 --end=2023-12-31
 
-# With moondream (lighter model)
-node --experimental-sqlite index.js --url=https://www.instagram.com/username/ --ollama-model=moondream
+# Remote MySQL
+node index.js --url=https://www.instagram.com/username/ \
+  --mysql-host=db.example.com --mysql-user=scraper --mysql-password=secret
 
-# Authenticated session (save state first with Playwright)
-node --experimental-sqlite index.js --url=https://www.instagram.com/username/ --auth-state=./auth.json
+# With auth state (login saved previously)
+node index.js --url=https://www.instagram.com/username/ --auth-state=./auth.json
 
 # Debug mode (visible browser)
-node --experimental-sqlite index.js --url=https://www.instagram.com/username/ --no-headless
+node index.js --url=https://www.instagram.com/username/ --no-headless
 ```
+
+## Saving Instagram Auth State
+
+Instagram requires login to view most profiles. Run the helper script once:
+
+```bash
+node save-auth.js
+```
+
+A Chrome window opens → log in manually → press Enter in terminal → session saved to `auth.json`.
+
+Then run the scraper with `--auth-state=./auth.json`.
 
 ## Architecture
 
 ```
-index.js                    ← CLI entry point (commander)
+index.js                    ← CLI entry point
+save-auth.js                ← One-time login helper
 src/
 ├── logger/index.js         ← Winston structured logger
-├── database/index.js       ← SQLite: schema, session tracking, parameterized inserts
+├── database/index.js       ← MySQL: pooling, auto-schema, parameterized inserts
 ├── browser/index.js        ← Playwright Chromium lifecycle
-├── scroll/controller.js    ← Infinite scroll async generator + date boundary detection
+├── scroll/controller.js    ← Infinite scroll async generator + date boundary
 ├── extractor/index.js      ← Instagram DOM parsing: image, caption, comments, date
-├── image/processor.js      ← Browser-context image download → base64
-├── vision/client.js        ← Ollama API client + JSON validation + retry
-├── queue/worker.js         ← p-queue worker pool
+├── image/processor.js      ← Image downloader → disk (downloads/YYYY/MM/)
+├── queue/worker.js         ← p-queue concurrent worker pool
 └── orchestrator/index.js   ← Main pipeline controller
+downloads/                  ← Downloaded images (auto-created, gitignored)
+  └── 2023/06/shortcode.jpg
 tests/
-├── db.test.js              ← SQLite module tests (in-memory DB)
-├── vision.test.js          ← Vision client JSON parsing tests
-└── extractor.test.js       ← Date parser and range tests
+├── db.test.js              ← MySQL integration tests
+└── extractor.test.js       ← Date parser + range tests
 ```
 
-## SQLite Schema
+## MySQL Schema
 
 ```sql
--- scrape_sessions: one row per run
+-- Database: instagram_clone_archive
+
 CREATE TABLE scrape_sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source_url TEXT, start_date_filter TEXT, end_date_filter TEXT,
-  start_time TEXT, end_time TEXT,
-  total_posts_processed INTEGER, total_posts_skipped INTEGER,
-  total_errors INTEGER, duration_seconds INTEGER
+  id                    INT AUTO_INCREMENT PRIMARY KEY,
+  source_url            VARCHAR(500),
+  start_date_filter     DATE,
+  end_date_filter       DATE,
+  start_time            DATETIME,
+  end_time              DATETIME,
+  total_posts_processed INT,
+  total_posts_skipped   INT,
+  total_errors          INT,
+  duration_seconds      INT
 );
 
--- posts: one row per unique Instagram post
 CREATE TABLE posts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  scrape_session_id INTEGER REFERENCES scrape_sessions(id),
-  post_identifier TEXT UNIQUE,   -- Instagram shortcode (e.g. ABC123)
-  source_url TEXT, post_url TEXT, image_url TEXT,
-  extracted_image_text TEXT,     -- JSON: detected_text, scene_description, objects_detected, additional_context
-  caption_text TEXT,
-  comments_json TEXT,            -- JSON array: [{username, text}]
-  published_at TEXT,             -- UTC ISO 8601
-  created_at TEXT DEFAULT (datetime('now'))
+  id                 INT AUTO_INCREMENT PRIMARY KEY,
+  scrape_session_id  INT REFERENCES scrape_sessions(id),
+  post_identifier    VARCHAR(255) UNIQUE,
+  source_url         VARCHAR(500),
+  post_url           VARCHAR(500),
+  image_url          VARCHAR(2000),
+  image_path         VARCHAR(500),     -- local file path
+  caption_text       TEXT,
+  comments_json      JSON,             -- [{username, text}]
+  published_at       DATETIME INDEX,
+  created_at         DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-```
-
-## Running Tests
-
-```bash
-node --experimental-sqlite tests/db.test.js   # DB tests (in-memory SQLite)
-node tests/vision.test.js                     # Vision client tests
-node tests/extractor.test.js                  # Date parser tests
 ```
 
 ## Querying Results
 
-```bash
-# Open the database
-sqlite3 data/scraper.db
+```sql
+-- Most recent posts
+SELECT post_identifier, published_at, caption_text, image_path
+FROM posts ORDER BY published_at DESC LIMIT 20;
 
-# View stored posts
-SELECT post_identifier, published_at, caption_text FROM posts ORDER BY published_at DESC LIMIT 20;
-
-# View session summary
+-- Session summary
 SELECT * FROM scrape_sessions;
 
-# View vision results for a post
-SELECT post_identifier, extracted_image_text FROM posts WHERE post_identifier = 'ABC123';
+-- Posts by year
+SELECT YEAR(published_at) AS yr, COUNT(*) AS total
+FROM posts GROUP BY yr ORDER BY yr;
+
+-- Search captions
+SELECT post_identifier, published_at, caption_text
+FROM posts WHERE caption_text LIKE '%breaking%';
+
+-- Posts with comments
+SELECT post_identifier, JSON_LENGTH(comments_json) AS num_comments
+FROM posts WHERE JSON_LENGTH(comments_json) > 0;
 ```
+
+## Downloaded Images
+
+Images are saved to `downloads/<year>/<month>/` with deterministic filenames based on the post identifier. The relative path is stored in the `image_path` column of the `posts` table.
 
 ## Termination Logic
 
-The scraper stops when **either** condition is met:
-1. **Content exhausted**: No new posts after 3 consecutive scroll stabilization checks
-2. **Date boundary**: A post older than `--start` is encountered
-3. **End-of-feed**: Instagram's "You're all caught up" banner is detected
+The scraper stops when **any** condition is met:
+1. **Content exhausted** — no new posts after 3 consecutive scroll checks
+2. **Date boundary** — posts older than `--start` encountered
+3. **End-of-feed** — Instagram's "You're all caught up" banner detected
 
-## Resumable Scraping
+## Tests
 
-On re-run against the same URL, the scraper checks the most recent `published_at` stored in the DB and skips already-archived posts, preventing duplicate processing.
+```bash
+# MySQL integration tests (requires running MySQL)
+node tests/db.test.js
+
+# Date parser tests (no external deps)
+node tests/extractor.test.js
+```
 
 ## Logs
 
-Structured logs are written to `logs/scraper.log` and the console.
-
 ```bash
-LOG_LEVEL=debug node --experimental-sqlite index.js --url=...
+tail -f logs/scraper.log
 ```

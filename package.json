@@ -1,22 +1,23 @@
 {
   "name": "instagram-news-scraper",
-  "version": "2.0.0",
-  "description": "Production-grade Instagram scraper with Playwright, Ollama vision, and SQLite storage",
+  "version": "3.0.0",
+  "description": "Production-grade Instagram scraper with Playwright, local image downloads, and MySQL storage",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node --experimental-sqlite index.js",
+    "start": "node index.js",
     "install-browsers": "npx playwright install chromium"
   },
   "dependencies": {
     "axios": "^1.6.7",
     "commander": "^12.0.0",
     "date-fns": "^3.3.1",
+    "mysql2": "^3.9.1",
     "p-queue": "^8.0.1",
     "playwright": "^1.42.1",
     "winston": "^3.11.0"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=18.0.0"
   }
 }

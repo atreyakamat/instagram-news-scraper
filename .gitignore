@@ -1,6 +1,14 @@
+# Dependencies
 node_modules/
+
+# Runtime data
+downloads/
 logs/
-*.log
-.env
-auth.json
 data/
+
+# Auth state (contains session cookies — keep private)
+auth.json
+
+# OS files
+.DS_Store
+Thumbs.db

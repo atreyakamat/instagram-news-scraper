@@ -1,3 +1,9 @@
+/**
+ * Orchestrator — main pipeline controller.
+ *
+ * Coordinates: MySQL → Playwright → scroll → extract → download image → insert DB.
+ * No vision/AI processing in this version.
+ */
 import { createLogger } from '../logger/index.js';
 import {
     initDb,
@@ -6,26 +12,22 @@ import {
     insertPost,
     getLatestPublishedAt,
     getPostDateRange,
+    closeDb,
 } from '../database/index.js';
 import { launchBrowser, navigateTo, closeBrowser } from '../browser/index.js';
 import { scrollUntilExhausted, INSTAGRAM_POST_SELECTOR } from '../scroll/controller.js';
 import { extractPost, getPostDateFromHandle, isWithinRange } from '../extractor/index.js';
-import { fetchImageAsBase64 } from '../image/processor.js';
-import { queryWithRetry } from '../vision/client.js';
+import { downloadImage } from '../image/processor.js';
 import { createWorkerPool, enqueuePost, drainQueue } from '../queue/worker.js';
 
 const logger = createLogger('orchestrator');
 
 /**
- * Main orchestrator — wires all modules together.
- *
  * @param {object} options
  * @param {string} options.url
  * @param {Date}   options.startDate
  * @param {Date}   options.endDate
- * @param {string} options.dbPath
- * @param {string} options.ollamaUrl
- * @param {string} options.ollamaModel
+ * @param {object} options.mysql        - { host, port, user, password, database }
  * @param {number} options.workers
  * @param {string|null} options.authStatePath
  * @param {boolean} options.headless
@@ -36,9 +38,7 @@ export async function run(options) {
         url,
         startDate,
         endDate,
-        dbPath,
-        ollamaUrl,
-        ollamaModel,
+        mysql: mysqlConf,
         workers,
         authStatePath,
         headless,
@@ -53,23 +53,24 @@ export async function run(options) {
         processed: 0,
         skipped: 0,
         errors: 0,
-        inferenceSuccesses: 0,
-        inferenceFails: 0,
+        imagesDownloaded: 0,
+        imagesFailed: 0,
     };
 
-    // ── In-memory dedup set ───────────────────────────────────────────────────
+    // ── In-memory dedup ───────────────────────────────────────────────────────
     const processedIds = new Set();
 
-    // ── Database ──────────────────────────────────────────────────────────────
-    const db = initDb(dbPath);
+    // ── MySQL ─────────────────────────────────────────────────────────────────
+    logger.info('Connecting to MySQL...');
+    const pool = await initDb(mysqlConf);
 
-    // Resumable: find latest already-stored date to skip re-processing
-    const latestStoredDate = getLatestPublishedAt(db);
+    // Resumable: skip already-archived posts
+    const latestStoredDate = await getLatestPublishedAt(pool);
     if (latestStoredDate) {
         logger.info(`Resuming: latest stored post date is ${latestStoredDate.toISOString()}`);
     }
 
-    const sessionId = createSession(db, {
+    const sessionId = await createSession(pool, {
         sourceUrl: url,
         startDateFilter: startDate.toISOString().slice(0, 10),
         endDateFilter: endDate.toISOString().slice(0, 10),
@@ -84,47 +85,47 @@ export async function run(options) {
     const queue = createWorkerPool(workers);
 
     /**
-     * Per-post job: vision inference → SQLite insert
+     * Per-post job: download image → insert into MySQL
      */
     async function processPost(postData) {
-        const inferenceStart = Date.now();
-        let extractedImageText = null;
+        let imagePath = null;
 
+        // Download image to disk
         if (postData.imageUrl) {
             try {
-                logger.info(`[${postData.postIdentifier.slice(0, 10)}] Downloading + inferring image...`);
-                const base64 = await fetchImageAsBase64(postData.imageUrl, page);
-                extractedImageText = await queryWithRetry(base64, ollamaModel, ollamaUrl);
-                stats.inferenceSuccesses++;
-                logger.info(
-                    `[${postData.postIdentifier.slice(0, 10)}] Inference done in ${Date.now() - inferenceStart}ms`
-                );
+                imagePath = await downloadImage({
+                    imageUrl: postData.imageUrl,
+                    postIdentifier: postData.postIdentifier,
+                    publishedAt: postData.publishedAt,
+                    page,
+                });
+                stats.imagesDownloaded++;
             } catch (err) {
-                stats.inferenceFails++;
+                stats.imagesFailed++;
                 stats.errors++;
-                logger.error(`[${postData.postIdentifier.slice(0, 10)}] Inference failed: ${err.message}`);
+                logger.error(`[${postData.postIdentifier.slice(0, 12)}] Image download failed: ${err.message}`);
             }
         } else {
-            logger.warn(`[${postData.postIdentifier.slice(0, 10)}] No image URL — skipping vision`);
+            logger.warn(`[${postData.postIdentifier.slice(0, 12)}] No image URL — skipping download`);
         }
 
+        // Insert into MySQL
         try {
-            const inserted = insertPost(db, sessionId, {
+            const inserted = await insertPost(pool, sessionId, {
                 ...postData,
-                sourceUrl: url,
-                extractedImageText,
+                imagePath,
             });
             if (inserted) {
                 stats.processed++;
                 logger.info(
-                    `[${postData.postIdentifier.slice(0, 10)}] Stored | published: ${postData.publishedAt?.toISOString()}`
+                    `[${postData.postIdentifier.slice(0, 12)}] Stored | published: ${postData.publishedAt?.toISOString()} | image: ${imagePath || 'N/A'}`
                 );
             } else {
-                logger.debug(`[${postData.postIdentifier.slice(0, 10)}] DB duplicate — skipped`);
+                logger.debug(`[${postData.postIdentifier.slice(0, 12)}] DB duplicate — skipped`);
             }
         } catch (err) {
             stats.errors++;
-            logger.error(`[${postData.postIdentifier.slice(0, 10)}] DB insert error: ${err.message}`);
+            logger.error(`[${postData.postIdentifier.slice(0, 12)}] DB insert error: ${err.message}`);
         }
     }
 
@@ -143,7 +144,7 @@ export async function run(options) {
         for await (const { handles, reachedOldBoundary } of scrollGen) {
             stats.discovered += handles.length;
             logger.info(
-                `Scroll batch: ${handles.length} new post(s) | total discovered: ${stats.discovered} | queue depth: ${queue.size}`
+                `Scroll batch: ${handles.length} new post(s) | total: ${stats.discovered} | queue: ${queue.size}`
             );
 
             for (const handle of handles) {
@@ -159,35 +160,33 @@ export async function run(options) {
 
                 // In-memory dedup
                 if (processedIds.has(postData.postIdentifier)) {
-                    logger.debug(`In-memory dup: ${postData.postIdentifier.slice(0, 10)}`);
+                    logger.debug(`Dup: ${postData.postIdentifier.slice(0, 12)}`);
                     continue;
                 }
                 processedIds.add(postData.postIdentifier);
 
                 // Date missing
                 if (!postData.publishedAt) {
-                    logger.warn(`No date for post ${postData.postIdentifier.slice(0, 10)} — skipping`);
+                    logger.warn(`No date for ${postData.postIdentifier.slice(0, 12)} — skipping`);
                     stats.skipped++;
                     continue;
                 }
 
                 // Date range filter
                 if (!isWithinRange(postData.publishedAt, startDate, endDate)) {
-                    logger.debug(
-                        `Out of range (${postData.publishedAt.toISOString()}) — skipping`
-                    );
+                    logger.debug(`Out of range (${postData.publishedAt.toISOString()}) — skipping`);
                     stats.skipped++;
                     continue;
                 }
 
-                // Resumable: skip already-archived posts
+                // Resumable: skip already-archived
                 if (latestStoredDate && postData.publishedAt <= latestStoredDate) {
                     logger.debug(`Already archived — skipping`);
                     stats.skipped++;
                     continue;
                 }
 
-                // Enqueue for async vision + DB processing
+                // Enqueue for download + DB insert
                 enqueuePost(queue, { ...postData, sourceUrl: url }, processPost);
             }
 
@@ -202,12 +201,12 @@ export async function run(options) {
     }
 
     // ── Drain queue ───────────────────────────────────────────────────────────
-    logger.info(`Scroll complete. Draining worker queue (${queue.size} remaining)...`);
+    logger.info(`Scroll complete. Draining queue (${queue.size} remaining)...`);
     await drainQueue(queue);
 
-    // ── Finalize session ──────────────────────────────────────────────────────
+    // ── Finalize ──────────────────────────────────────────────────────────────
     const durationSeconds = Math.round((Date.now() - startTime) / 1000);
-    finalizeSession(db, sessionId, {
+    await finalizeSession(pool, sessionId, {
         processed: stats.processed,
         skipped: stats.skipped,
         errors: stats.errors,
@@ -216,19 +215,19 @@ export async function run(options) {
 
     await closeBrowser(browser);
 
-    // ── Final summary ─────────────────────────────────────────────────────────
-    const dateRange = getPostDateRange(db, sessionId);
-    db.close();
+    // ── Summary ───────────────────────────────────────────────────────────────
+    const dateRange = await getPostDateRange(pool, sessionId);
+    await closeDb(pool);
 
     const summary = {
         dateRangeApplied: `${startDate.toISOString().slice(0, 10)} → ${endDate.toISOString().slice(0, 10)}`,
         totalPostsScanned: stats.discovered,
         totalPostsStored: stats.processed,
         totalPostsSkipped: stats.skipped,
+        imagesDownloaded: stats.imagesDownloaded,
+        imagesFailed: stats.imagesFailed,
         oldestStoredPost: dateRange.oldest?.toISOString() || 'N/A',
         newestStoredPost: dateRange.newest?.toISOString() || 'N/A',
-        visionInferenceSuccesses: stats.inferenceSuccesses,
-        visionInferenceFails: stats.inferenceFails,
         totalErrors: stats.errors,
         totalRuntimeSeconds: durationSeconds,
     };
