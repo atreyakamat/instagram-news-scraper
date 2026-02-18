@@ -42,6 +42,7 @@ export async function* scrollUntilExhausted(page, options) {
     let lastPostCount = 0;
     let lastScrollHeight = 0;
     let reachedOldBoundary = false;
+    let totalIterations = 0;
 
     // Track seen post handles by their stable identity (shortcode or src)
     const seenIds = new Set();
@@ -60,6 +61,18 @@ export async function* scrollUntilExhausted(page, options) {
         const currentScrollHeight = await page.evaluate(() => document.body.scrollHeight);
         const allHandles = await page.$$(postSelector);
         const currentPostCount = allHandles.length;
+        totalIterations++;
+
+        // ── Early warning: no posts found at all ──────────────────────────────
+        if (totalIterations === 1 && currentPostCount === 0) {
+            logger.warn(
+                `No posts found with selector "${postSelector}" on first check.\n` +
+                `This usually means:\n` +
+                `  1. Instagram is showing a login wall (re-run: node save-auth.js)\n` +
+                `  2. The page hasn't fully loaded yet (try --no-headless to debug)\n` +
+                `  3. The post selector doesn't match this platform's HTML`
+            );
+        }
 
         logger.debug(
             `Scroll check: posts=${currentPostCount}, scrollHeight=${currentScrollHeight}, stable=${stableCount}`
@@ -126,11 +139,20 @@ export async function* scrollUntilExhausted(page, options) {
             window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
         );
 
+        // Keepalive: move the mouse slightly so the page doesn't go idle
+        await page.mouse.move(640, 400).catch(() => { });
+
         // Wait for network to settle (with timeout fallback for Instagram's polling)
         await waitForNetworkIdle(page, NETWORK_IDLE_TIMEOUT_MS);
 
         // Additional render stabilization — Instagram needs time to inject new articles
-        await page.waitForTimeout(SCROLL_PAUSE_MS);
+        try {
+            await page.waitForTimeout(SCROLL_PAUSE_MS);
+        } catch {
+            // Page was closed externally — exit the loop gracefully
+            logger.warn('Page closed during scroll pause — stopping loop');
+            break;
+        }
     }
 
     logger.info(`Scroll loop complete. Total unique posts discovered: ${seenIds.size}`);

@@ -50,12 +50,18 @@ export async function launchBrowser({ headless = true, authStatePath = null } = 
 
     const page = await context.newPage();
 
+    // Disable default timeout — scraping sessions can run for hours.
+    // Individual operations set their own timeouts where needed.
+    page.setDefaultTimeout(0);
+    page.setDefaultNavigationTimeout(60000); // 60s for navigation only
+
     logger.info('Browser launched successfully');
     return { browser, context, page };
 }
 
 /**
- * Navigate to a URL and wait for the page to be ready
+ * Navigate to a URL, wait for the page to be ready, and detect login walls.
+ * Throws if Instagram redirects to the login page (auth state missing/expired).
  */
 export async function navigateTo(page, url) {
     logger.info(`Navigating to: ${url}`);
@@ -63,9 +69,35 @@ export async function navigateTo(page, url) {
         waitUntil: 'domcontentloaded',
         timeout: 60000,
     });
-    // Give the page a moment to render initial content
-    await page.waitForTimeout(2000);
-    logger.info('Navigation complete');
+
+    // Give Instagram's React app time to hydrate and render the feed
+    await page.waitForTimeout(4000);
+
+    // ── Login wall detection ──────────────────────────────────────────────────
+    const currentUrl = page.url();
+    const isLoginWall =
+        currentUrl.includes('/accounts/login') ||
+        currentUrl.includes('/challenge/') ||
+        currentUrl.includes('/checkpoint/');
+
+    if (isLoginWall) {
+        throw new Error(
+            `Instagram redirected to login/challenge: ${currentUrl}\n` +
+            `Your auth session has expired or is missing.\n` +
+            `Run: node save-auth.js  to re-authenticate, then retry with --auth-state=./auth.json`
+        );
+    }
+
+    // Also check for login form on the page even if URL didn't change
+    const hasLoginForm = await page.$('input[name="username"]').then(el => !!el).catch(() => false);
+    if (hasLoginForm) {
+        throw new Error(
+            `Instagram is showing a login form at ${currentUrl}.\n` +
+            `Run: node save-auth.js  to save your session, then retry with --auth-state=./auth.json`
+        );
+    }
+
+    logger.info(`Navigation complete: ${currentUrl}`);
 }
 
 /**
