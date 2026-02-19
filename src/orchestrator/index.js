@@ -47,6 +47,10 @@ export async function run(opts) {
     // ── Stats ───────────────────────────────────────────────────────────────
     const stats = { processed: 0, skipped: 0, errors: 0, images: 0, imageFails: 0 };
 
+    // Track total posts received by interceptor (regardless of date filter)
+    // Used to keep the scroll going even when everything is filtered out
+    let totalIntercepted = 0;
+
     // ── MySQL ───────────────────────────────────────────────────────────────
     logger.info('Connecting to MySQL...');
     const pool = await initDb(mysqlConf);
@@ -130,6 +134,7 @@ export async function run(opts) {
 
     // Attach GraphQL interceptor BEFORE navigating so we don't miss early responses
     const interceptor = attachInterceptor(page, (post) => {
+        totalIntercepted++;
         // Process immediately as it arrives from the network
         const wasValid = processor.process(post);
         if (!wasValid && processor.belowBoundary) {
@@ -155,21 +160,27 @@ export async function run(opts) {
     // ── Scroll loop ─────────────────────────────────────────────────────────
     const scroller = driveScroll(page);
 
-    // Prime the generator
+    // Prime the generator (triggers scroll #1, waits, then yields)
     await scroller.next();
 
-    while (true) {
-        // Reset batch counter before each scroll yield
-        const batchStart = pendingNewPosts;
+    // Track how many posts the interceptor has received to detect real content exhaustion
+    let lastBatchIntercepted = 0;
 
-        // Advance scroll, pass whether new posts arrived in the previous scroll
-        const { value, done } = await scroller.next(pendingNewPosts > batchStart);
+    while (true) {
+        // Did the interceptor receive ANY new posts since the last scroll?
+        // (independent of date filter — keeps scrolling even when posts are "too new")
+        const hadNewData = totalIntercepted > lastBatchIntercepted;
+        lastBatchIntercepted = totalIntercepted;
+
+        const batchStartPending = pendingNewPosts;
+
+        const { value, done } = await scroller.next(hadNewData);
 
         if (done) break;
 
-        const newInBatch = pendingNewPosts - batchStart;
+        const newInBatch = pendingNewPosts - batchStartPending;
         logger.info(
-            `Scroll #${value.iteration}: ${newInBatch} new post(s) queued | total valid: ${processor.stats.inRange} | queue: ${queue.size}`
+            `Scroll #${value.iteration}: ${newInBatch} new post(s) queued | total valid: ${processor.stats.inRange} | intercepted: ${totalIntercepted} | queue: ${queue.size}`
         );
 
         if (dateBoundaryHit) {

@@ -5,7 +5,7 @@
  *
  * Usage:
  *   node index.js --url=https://www.instagram.com/username/ \
- *     --start=2021-01-01 --end=2025-12-31 \
+ *     --start=2020-01-01 --end=2030-12-31 \
  *     --mysql-user=root --mysql-password=secret \
  *     --auth-state=./auth.json
  */
@@ -26,7 +26,7 @@ program
     .version('4.0.0')
     .requiredOption('--url <url>', 'Profile URL to scrape')
     .option('--start <date>', 'Start date inclusive (YYYY-MM-DD)', '2020-01-01')
-    .option('--end <date>', 'End date inclusive (YYYY-MM-DD)', '2025-01-01')
+    .option('--end <date>', 'End date inclusive (YYYY-MM-DD)', '2030-12-31')
     .option('--workers <n>', 'Parallel download/insert workers', '3')
     .option('--mysql-host <host>', 'MySQL host', 'localhost')
     .option('--mysql-port <port>', 'MySQL port', '3306')
