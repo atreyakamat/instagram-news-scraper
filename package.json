@@ -1,7 +1,7 @@
 {
   "name": "instagram-news-scraper",
-  "version": "3.0.0",
-  "description": "Production-grade Instagram scraper with Playwright, local image downloads, and MySQL storage",
+  "version": "4.0.0",
+  "description": "Production-grade Instagram scraper using GraphQL interception, local image downloads, and MySQL storage",
   "type": "module",
   "main": "index.js",
   "scripts": {
