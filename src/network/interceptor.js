@@ -123,6 +123,7 @@ function looksLikePost(obj) {
 
 /**
  * Extract the highest-resolution image URL from a post node.
+ * Also handles video URLs and video thumbnails.
  */
 function extractImageUrl(node) {
     // Prefer display_resources / candidates array (highest res last or first)
@@ -144,6 +145,17 @@ function extractImageUrl(node) {
             }
         }
     }
+
+    // Video posts — extract video_url or highest-quality version from video_versions
+    for (const field of ['video_url', 'video_dash_manifest']) {
+        if (typeof node[field] === 'string' && node[field].startsWith('http')) return node[field];
+    }
+    if (Array.isArray(node.video_versions) && node.video_versions.length > 0) {
+        const sorted = [...node.video_versions].sort((a, b) => (b.width || 0) - (a.width || 0));
+        const src = sorted[0]?.url;
+        if (src) return src;
+    }
+
     // Fallback: first matching direct field
     for (const field of IMAGE_URL_FIELDS) {
         if (typeof node[field] === 'string' && node[field].startsWith('http')) {
@@ -240,12 +252,25 @@ function normalizePost(node) {
     const id = extractId(node);
     if (!id) return null;
 
+    // Build Instagram post URL from shortcode/code field when available
+    const shortcode = node.shortcode || node.code || null;
+    const postUrl = shortcode
+        ? `https://www.instagram.com/p/${shortcode}/`
+        : null;
+
+    // Detect post type
+    const isVideo = !!(node.is_video || node.video_url || node.video_versions);
+    const isCarousel = !!(node.carousel_media || node.sidecar_media || node.__typename === 'GraphSidecar');
+
     return {
         postIdentifier: id,
+        postUrl,
         imageUrl: extractImageUrl(node),
         captionText: extractCaption(node),
         comments: extractComments(node),
         publishedAt: extractTimestamp(node),
+        isVideo,
+        isCarousel,
         rawNode: node, // kept briefly for debugging; cleared after processing
     };
 }
@@ -313,7 +338,21 @@ export function attachInterceptor(page, onPost) {
 
             for (const node of nodes) {
                 const post = normalizePost(node);
-                if (post) {
+                if (!post) continue;
+
+                // Carousel post — emit each slide as a separate row (same caption/date, unique image)
+                const carouselSlides = node.carousel_media || node.sidecar_media;
+                if (Array.isArray(carouselSlides) && carouselSlides.length > 1) {
+                    logger.info(`[interceptor] Carousel post ${post.postIdentifier}: ${carouselSlides.length} slides`);
+                    carouselSlides.forEach((slide, idx) => {
+                        onPost({
+                            ...post,
+                            postIdentifier: `${post.postIdentifier}_c${idx + 1}`,
+                            imageUrl: extractImageUrl(slide) || post.imageUrl,
+                            rawNode: undefined,
+                        });
+                    });
+                } else {
                     onPost(post);
                 }
             }

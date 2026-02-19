@@ -16,9 +16,9 @@ import { createLogger } from '../logger/index.js';
 
 const logger = createLogger('scroll');
 
-const SCROLL_PAUSE_MS = 2500;   // Wait after each scroll for new content to load
-const NETWORK_IDLE_MS = 5000;   // Timeout for waitForLoadState('networkidle')
-const MAX_STABLE_ITERS = 3;      // Stop after this many scrolls with no new posts
+const SCROLL_PAUSE_MS = 4000;   // Wait after each scroll for new content to load
+const NETWORK_IDLE_MS = 6000;   // Timeout for waitForLoadState('networkidle')
+const MAX_STABLE_ITERS = 10;    // Stop after this many scrolls with no new posts
 
 /**
  * Infinite scroll driver as an async generator.
@@ -54,7 +54,17 @@ export async function* driveScroll(page) {
 
         // Keepalive mouse move to prevent page idle detection
         await page.mouse.move(640, 400).catch(() => { });
-
+        // When seemingly stuck, use alternative techniques to trigger lazy loading
+        if (stableCount >= 2) {
+            logger.debug(`Scroll #${iteration}: applying nudge techniques (stable=${stableCount})`);
+            // Slight scroll up then back down — triggers IntersectionObserver on Instagram
+            await page.evaluate(() => window.scrollBy(0, -400)).catch(() => { });
+            await page.waitForTimeout(400).catch(() => { });
+            await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })).catch(() => { });
+            await page.waitForTimeout(400).catch(() => { });
+            // Simulate keyboard Page Down to trigger feed loading
+            await page.keyboard.press('End').catch(() => { });
+        }
         // Wait for network to settle
         await waitNetworkIdle(page, NETWORK_IDLE_MS);
 

@@ -38,9 +38,10 @@ const logger = createLogger('orchestrator');
  * @param {number}       opts.workers
  * @param {string|null}  opts.authStatePath
  * @param {boolean}      opts.headless
+ * @param {string[]}     [opts.keywords]     - caption keyword filter (empty = keep all)
  */
 export async function run(opts) {
-    const { url, startDate, endDate, mysql: mysqlConf, workers, authStatePath, headless } = opts;
+    const { url, startDate, endDate, mysql: mysqlConf, workers, authStatePath, headless, keywords = [] } = opts;
     const startTime = Date.now();
 
     // ── Stats ───────────────────────────────────────────────────────────────
@@ -78,6 +79,7 @@ export async function run(opts) {
         startDate,
         endDate,
         latestStoredDate: latestStored,
+        keywords,
         onValidPost: (post) => {
             pendingNewPosts++;
             // Enqueue download + insert
@@ -148,6 +150,7 @@ export async function run(opts) {
     logger.info(`Scraping: ${url}`);
     logger.info(`Date range: ${startDate.toISOString().slice(0, 10)} → ${endDate.toISOString().slice(0, 10)}`);
     logger.info(`Workers: ${workers}`);
+    logger.info(`Keywords: ${keywords.length > 0 ? keywords.join(', ') : '(all posts)'}`);
 
     // ── Scroll loop ─────────────────────────────────────────────────────────
     const scroller = driveScroll(page);

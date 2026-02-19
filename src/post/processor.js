@@ -17,10 +17,12 @@ export class PostProcessor {
      * @param {Date|null} opts.latestStoredDate - for resumable scraping
      * @param {function(object): void} opts.onValidPost - called for each in-range post
      */
-    constructor({ startDate, endDate, latestStoredDate, onValidPost }) {
+    constructor({ startDate, endDate, latestStoredDate, keywords = [], onValidPost }) {
         this.startDate = startDate;
         this.endDate = endDate;
         this.latestStoredDate = latestStoredDate;
+        // Lowercase for case-insensitive matching
+        this.keywords = keywords.map(k => k.toLowerCase());
         this.onValidPost = onValidPost;
 
         this.seenIds = new Set();
@@ -32,6 +34,7 @@ export class PostProcessor {
             tooNew: 0,
             noDate: 0,
             noDup: 0,
+            noKeyword: 0,
         };
 
         // Track whether any post in the latest batch was below the start date
@@ -89,6 +92,19 @@ export class PostProcessor {
             return false;
         }
 
+        // ── Keyword filter ────────────────────────────────────────────────────
+        if (this.keywords.length > 0) {
+            const haystack = (post.captionText || '').toLowerCase();
+            const matched = this.keywords.some(kw => haystack.includes(kw));
+            if (!matched) {
+                this.stats.noKeyword++;
+                this.stats.skipped++;
+                logger.debug(`Keyword filter: no match for ${post.postIdentifier}`);
+                return false;
+            }
+            logger.debug(`Keyword matched for ${post.postIdentifier}`);
+        }
+
         // ── Valid post ────────────────────────────────────────────────────────
         this.stats.inRange++;
         logger.info(`Valid post: ${post.postIdentifier} | ${ts.toISOString()}`);
@@ -112,6 +128,6 @@ export class PostProcessor {
     }
 
     logSummary() {
-        logger.info(`Post processor summary: total=${this.stats.total} inRange=${this.stats.inRange} tooOld=${this.stats.tooOld} tooNew=${this.stats.tooNew} noDate=${this.stats.noDate} dup=${this.stats.noDup}`);
+        logger.info(`Post processor summary: total=${this.stats.total} inRange=${this.stats.inRange} tooOld=${this.stats.tooOld} tooNew=${this.stats.tooNew} noDate=${this.stats.noDate} dup=${this.stats.noDup} keywordFiltered=${this.stats.noKeyword}`);
     }
 }

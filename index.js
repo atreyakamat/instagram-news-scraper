@@ -25,8 +25,8 @@ program
     .description('GraphQL-interception scraper with local image downloads and MySQL storage')
     .version('4.0.0')
     .requiredOption('--url <url>', 'Profile URL to scrape')
-    .option('--start <date>', 'Start date inclusive (YYYY-MM-DD)', '2021-01-01')
-    .option('--end <date>', 'End date inclusive (YYYY-MM-DD)', '2025-12-31')
+    .option('--start <date>', 'Start date inclusive (YYYY-MM-DD)', '2020-01-01')
+    .option('--end <date>', 'End date inclusive (YYYY-MM-DD)', '2025-01-01')
     .option('--workers <n>', 'Parallel download/insert workers', '3')
     .option('--mysql-host <host>', 'MySQL host', 'localhost')
     .option('--mysql-port <port>', 'MySQL port', '3306')
@@ -34,6 +34,7 @@ program
     .option('--mysql-password <pw>', 'MySQL password', '')
     .option('--mysql-database <db>', 'MySQL database name', 'instagram_clone_archive')
     .option('--auth-state <path>', 'Playwright storage state JSON path')
+    .option('--keywords <words>', 'Comma-separated caption keywords to keep (empty string = keep all posts)', 'accident,crash,death,killed,injured,fire,flood,disaster,crime,murder,robbery,blast,explosion,missing,tragedy,collision,victim,police,rescue,ambulance')
     .option('--no-headless', 'Run browser in headed mode (debug)')
     .parse(process.argv);
 
@@ -66,6 +67,8 @@ logger.info('Instagram News Scraper v4.0.0 (GraphQL Interception)');
 logger.info(`  URL:          ${opts.url}`);
 logger.info(`  Date range:   ${opts.start} → ${opts.end}`);
 logger.info(`  Workers:      ${workers}`);
+const keywords = opts.keywords ? opts.keywords.split(',').map(k => k.trim()).filter(Boolean) : [];
+logger.info(`  Keywords:     ${keywords.length > 0 ? keywords.join(', ') : '(all posts)'}`);
 logger.info(`  MySQL:        ${opts.mysqlUser}@${opts.mysqlHost}:${opts.mysqlPort}/${opts.mysqlDatabase}`);
 logger.info(`  Headless:     ${opts.headless}`);
 if (opts.authState) logger.info(`  Auth state:   ${opts.authState}`);
@@ -74,6 +77,7 @@ run({
     url: opts.url,
     startDate,
     endDate,
+    keywords,
     mysql: {
         host: opts.mysqlHost,
         port: parseInt(opts.mysqlPort, 10),
