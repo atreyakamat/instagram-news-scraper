@@ -1,200 +1,126 @@
 /**
- * Database module — MySQL via mysql2/promise.
- *
- * Handles connection pooling, schema initialization, session tracking,
- * and idempotent post inserts with parameterized queries.
+ * JSON Database Module
+ * Stores scraped data into a JSON file instead of MySQL
  */
-import mysql from 'mysql2/promise';
-import { createLogger } from '../logger/index.js';
 
-const logger = createLogger('database');
+import fs from "fs/promises";
+import path from "path";
+import { createLogger } from "../logger/index.js";
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
+const logger = createLogger("json-db");
 
-const CREATE_SESSIONS_TABLE = `
-  CREATE TABLE IF NOT EXISTS scrape_sessions (
-    id                    INT          AUTO_INCREMENT PRIMARY KEY,
-    source_url            VARCHAR(500) NOT NULL,
-    start_date_filter     DATE         NOT NULL,
-    end_date_filter       DATE         NOT NULL,
-    start_time            DATETIME     NOT NULL,
-    end_time              DATETIME,
-    total_posts_processed INT          DEFAULT 0,
-    total_posts_skipped   INT          DEFAULT 0,
-    total_errors          INT          DEFAULT 0,
-    duration_seconds      INT
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-`;
+const OUTPUT_FILE = path.resolve("scraped_posts.json");
 
-const CREATE_POSTS_TABLE = `
-  CREATE TABLE IF NOT EXISTS posts (
-    id                 INT          AUTO_INCREMENT PRIMARY KEY,
-    scrape_session_id  INT          NOT NULL,
-    post_identifier    VARCHAR(255) NOT NULL UNIQUE,
-    source_url         VARCHAR(500),
-    post_url           VARCHAR(500),
-    media_type         VARCHAR(20)  DEFAULT 'image',
-    image_url          VARCHAR(2000),
-    image_path         VARCHAR(500),
-    video_url          VARCHAR(2000),
-    caption_text       TEXT,
-    comments_json      JSON,
-    published_at       DATETIME,
-    created_at         DATETIME     DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_published_at (published_at),
-    INDEX idx_session (scrape_session_id),
-    FOREIGN KEY (scrape_session_id) REFERENCES scrape_sessions(id) ON DELETE CASCADE
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-`;
+let db = {
+  sessions: [],
+  posts: []
+};
 
-// ─── Connection ───────────────────────────────────────────────────────────────
+// ─── Init ─────────────────────────────────────
 
-/**
- * Create a MySQL connection pool and initialize schema.
- *
- * @param {object} conf
- * @param {string} conf.host
- * @param {number} conf.port
- * @param {string} conf.user
- * @param {string} conf.password
- * @param {string} conf.database
- * @returns {Promise<mysql.Pool>}
- */
-export async function initDb({ host, port, user, password, database }) {
-  // First connect without database to create it if missing
-  const tempPool = mysql.createPool({ host, port, user, password, waitForConnections: true, connectionLimit: 2 });
-  await tempPool.query(`CREATE DATABASE IF NOT EXISTS \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-  await tempPool.end();
+export async function initDb() {
+  try {
+    const data = await fs.readFile(OUTPUT_FILE, "utf-8");
+    db = JSON.parse(data);
+    logger.info("Loaded existing JSON database");
+  } catch {
+    await saveDb();
+    logger.info("Created new JSON database");
+  }
+}
 
-  // Now connect to the target database
-  const pool = mysql.createPool({
-    host,
-    port,
-    user,
-    password,
-    database,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    charset: 'utf8mb4',
+// ─── Save helper ──────────────────────────────
+
+async function saveDb() {
+  await fs.writeFile(OUTPUT_FILE, JSON.stringify(db, null, 2));
+}
+
+// ─── Sessions ─────────────────────────────────
+
+export async function createSession(_, { sourceUrl, startDateFilter, endDateFilter }) {
+  const sessionId = db.sessions.length + 1;
+
+  db.sessions.push({
+    id: sessionId,
+    source_url: sourceUrl,
+    start_date_filter: startDateFilter,
+    end_date_filter: endDateFilter,
+    start_time: new Date().toISOString(),
+    end_time: null,
+    total_posts_processed: 0,
+    total_posts_skipped: 0,
+    total_errors: 0
   });
 
-  await pool.query(CREATE_SESSIONS_TABLE);
-  await pool.query(CREATE_POSTS_TABLE);
-
-  // Migrations — add new columns to existing tables without dropping data
-  await pool.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS media_type VARCHAR(20) DEFAULT 'image' AFTER post_url`).catch(() => {});
-  await pool.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url VARCHAR(2000) AFTER image_path`).catch(() => {});
-
-  logger.info(`MySQL ready: ${user}@${host}:${port}/${database}`);
-  return pool;
+  await saveDb();
+  return sessionId;
 }
 
-// ─── Sessions ─────────────────────────────────────────────────────────────────
+export async function finalizeSession(_, sessionId, stats) {
+  const session = db.sessions.find(s => s.id === sessionId);
+  if (!session) return;
 
-/**
- * Create a new scrape session record.
- * @returns {Promise<number>} session id
- */
-export async function createSession(pool, { sourceUrl, startDateFilter, endDateFilter }) {
-  const [result] = await pool.query(
-    `INSERT INTO scrape_sessions (source_url, start_date_filter, end_date_filter, start_time)
-     VALUES (?, ?, ?, NOW())`,
-    [sourceUrl, startDateFilter, endDateFilter]
-  );
-  logger.info(`Created scrape session id=${result.insertId}`);
-  return result.insertId;
+  session.end_time = new Date().toISOString();
+  session.total_posts_processed = stats.processed;
+  session.total_posts_skipped = stats.skipped;
+  session.total_errors = stats.errors;
+  session.duration_seconds = stats.durationSeconds;
+
+  await saveDb();
 }
 
-/**
- * Finalize a session with stats.
- */
-export async function finalizeSession(pool, sessionId, { processed, skipped, errors, durationSeconds }) {
-  await pool.query(
-    `UPDATE scrape_sessions
-     SET end_time              = NOW(),
-         total_posts_processed = ?,
-         total_posts_skipped   = ?,
-         total_errors          = ?,
-         duration_seconds      = ?
-     WHERE id = ?`,
-    [processed, skipped, errors, durationSeconds, sessionId]
-  );
-  logger.info(`Finalized session id=${sessionId}: processed=${processed} skipped=${skipped} errors=${errors}`);
+// ─── Posts ───────────────────────────────────
+
+export async function insertPost(_, sessionId, postData) {
+  const exists = db.posts.find(p => p.post_identifier === postData.postIdentifier);
+  if (exists) return false;
+
+  db.posts.push({
+    scrape_session_id: sessionId,
+    post_identifier: postData.postIdentifier,
+    source_url: postData.sourceUrl || null,
+    post_url: postData.postUrl || null,
+    media_type: postData.mediaType || "image",
+    image_url: postData.imageUrl || null,
+    image_path: postData.imagePath || null,
+    video_url: postData.videoUrl || null,
+    caption_text: postData.captionText || "",
+    comments: postData.comments || [],
+    published_at: postData.publishedAt
+      ? postData.publishedAt.toISOString()
+      : null,
+    created_at: new Date().toISOString()
+  });
+
+  await saveDb();
+  return true;
 }
 
-// ─── Posts ────────────────────────────────────────────────────────────────────
+// ─── Queries ─────────────────────────────────
 
-/**
- * Insert a post. Duplicates are silently ignored via INSERT IGNORE (unique on post_identifier).
- * @returns {Promise<boolean>} true if new row was inserted
- */
-export async function insertPost(pool, sessionId, postData) {
-  const [result] = await pool.query(
-    `INSERT IGNORE INTO posts
-       (scrape_session_id, post_identifier, source_url, post_url, media_type,
-        image_url, image_path, video_url, caption_text, comments_json, published_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      sessionId,
-      postData.postIdentifier,
-      postData.sourceUrl || null,
-      postData.postUrl || null,
-      postData.mediaType || 'image',
-      postData.imageUrl || null,
-      postData.imagePath || null,
-      postData.videoUrl || null,
-      postData.captionText || '',
-      JSON.stringify(postData.comments || []),
-      postData.publishedAt ? postData.publishedAt.toISOString().slice(0, 19).replace('T', ' ') : null,
-    ]
-  );
+export async function getLatestPublishedAt(_, sourceUrl) {
+  const posts = db.posts
+    .filter(p => p.source_url === sourceUrl && p.published_at)
+    .sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
 
-  const inserted = result.affectedRows > 0;
-  if (inserted) {
-    logger.debug(`Inserted post: ${postData.postIdentifier}`);
-  } else {
-    logger.debug(`Duplicate skipped: ${postData.postIdentifier}`);
-  }
-  return inserted;
+  return posts.length ? new Date(posts[0].published_at) : null;
 }
 
-/**
- * Get the most recent published_at for a specific source URL (for resumable scraping).
- * Scoped to source_url so scraping account B doesn't block account A's older posts.
- * @returns {Promise<Date|null>}
- */
-export async function getLatestPublishedAt(pool, sourceUrl) {
-  const [rows] = await pool.query(
-    `SELECT published_at FROM posts WHERE source_url = ? ORDER BY published_at DESC LIMIT 1`,
-    [sourceUrl]
-  );
-  return rows.length > 0 && rows[0].published_at ? new Date(rows[0].published_at) : null;
-}
+export async function getPostDateRange(_, sessionId) {
+  const posts = db.posts.filter(p => p.scrape_session_id === sessionId);
 
-/**
- * Get oldest and newest post dates for a session.
- * @returns {Promise<{ oldest: Date|null, newest: Date|null }>}
- */
-export async function getPostDateRange(pool, sessionId) {
-  const [oldestRows] = await pool.query(
-    `SELECT published_at FROM posts WHERE scrape_session_id = ? ORDER BY published_at ASC  LIMIT 1`,
-    [sessionId]
+  if (!posts.length) return { oldest: null, newest: null };
+
+  const sorted = posts.sort(
+    (a, b) => new Date(a.published_at) - new Date(b.published_at)
   );
-  const [newestRows] = await pool.query(
-    `SELECT published_at FROM posts WHERE scrape_session_id = ? ORDER BY published_at DESC LIMIT 1`,
-    [sessionId]
-  );
+
   return {
-    oldest: oldestRows.length > 0 && oldestRows[0].published_at ? new Date(oldestRows[0].published_at) : null,
-    newest: newestRows.length > 0 && newestRows[0].published_at ? new Date(newestRows[0].published_at) : null,
+    oldest: new Date(sorted[0].published_at),
+    newest: new Date(sorted[sorted.length - 1].published_at)
   };
 }
 
-/**
- * Close the connection pool.
- */
-export async function closeDb(pool) {
-  await pool.end();
-  logger.info('MySQL connection pool closed');
+export async function closeDb() {
+  logger.info("JSON database saved");
 }

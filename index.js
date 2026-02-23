@@ -29,7 +29,7 @@ program
     .option('--end <date>', 'End date inclusive (YYYY-MM-DD)', '2030-12-31')
     .option('--workers <n>', 'Parallel download/insert workers', '3')
     .option('--mysql-host <host>', 'MySQL host', 'localhost')
-    .option('--mysql-port <port>', 'MySQL port', '3306')
+    .option('--mysql-port <port>', 'MySQL port', '3307')
     .option('--mysql-user <user>', 'MySQL user', 'root')
     .option('--mysql-password <pw>', 'MySQL password', '')
     .option('--mysql-database <db>', 'MySQL database name', 'instagram_clone_archive')
