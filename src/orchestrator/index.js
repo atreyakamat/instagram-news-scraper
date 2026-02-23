@@ -55,7 +55,7 @@ export async function run(opts) {
     logger.info('Connecting to MySQL...');
     const pool = await initDb(mysqlConf);
 
-    const latestStored = await getLatestPublishedAt(pool);
+    const latestStored = await getLatestPublishedAt(pool, url);
     if (latestStored) {
         logger.info(`Resuming: latest stored post at ${latestStored.toISOString()}`);
     }
@@ -90,21 +90,21 @@ export async function run(opts) {
             queue.add(async () => {
                 let imagePath = null;
 
-                if (post.imageUrl) {
-                    try {
-                        imagePath = await downloadImage({
-                            imageUrl: post.imageUrl,
-                            postIdentifier: post.postIdentifier,
-                            publishedAt: post.publishedAt,
-                        });
-                        stats.images++;
-                    } catch (err) {
-                        stats.imageFails++;
-                        stats.errors++;
-                        logger.error(`Image download failed [${post.postIdentifier}]: ${err.message}`);
-                    }
-                }
+                    // Download video file if this is a video post, otherwise download image
+                    const downloadUrl = post.videoUrl || post.imageUrl;
 
+                    if (downloadUrl) {
+                        try {
+                            imagePath = await downloadImage({
+                                imageUrl: downloadUrl,
+                                postIdentifier: post.postIdentifier,
+                                publishedAt: post.publishedAt,
+                            });
+                            stats.images++;
+                        } catch (err) {
+                            stats.imageFails++;
+                            stats.errors++;
+                            logger.error(`Media download failed [${post.postIdentifier}]: ${err.message}`);
                 try {
                     const inserted = await insertPost(pool, sessionId, {
                         ...post,
@@ -113,8 +113,9 @@ export async function run(opts) {
                     });
                     if (inserted) {
                         stats.processed++;
+                        const captionPreview = (post.captionText || '').slice(0, 60).replace(/\n/g, ' ');
                         logger.info(
-                            `Stored [${post.postIdentifier}] | ${post.publishedAt.toISOString()} | image: ${imagePath || 'N/A'}`
+                            `Stored [${post.postIdentifier}] | ${post.mediaType || 'image'} | ${post.publishedAt.toISOString()} | "${captionPreview}" | file: ${imagePath || 'N/A'}`
                         );
                     }
                 } catch (err) {

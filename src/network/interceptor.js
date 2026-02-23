@@ -45,10 +45,15 @@ const DISPLAY_RESOURCES_FIELDS = ['display_resources', 'image_versions2', 'candi
 // ─── Field names for post ID ──────────────────────────────────────────────────
 const ID_FIELDS = ['id', 'pk', 'post_id', 'media_id', 'shortcode', 'code'];
 
-// ─── Field names for caption text ────────────────────────────────────────────
+// ─── Field names for caption text (user-written first, auto-generated last) ───
+// accessibility_caption is Instagram's auto-generated label (e.g. "Photo by..."),
+// NOT the user's own caption — keep it only as a last resort.
 const CAPTION_FIELDS = [
-    'accessibility_caption', 'caption', 'text',
-    'edge_media_to_caption', 'description',
+    'edge_media_to_caption', // { edges: [{ node: { text } }] }  ← most reliable
+    'caption',               // string OR { text: '...' }
+    'description',           // some third-party feeds
+    'text',                  // occasionally flat
+    'accessibility_caption', // auto-generated — fallback only
 ];
 
 // ─── Field names for timestamp ────────────────────────────────────────────────
@@ -167,18 +172,40 @@ function extractImageUrl(node) {
 
 /**
  * Extract caption text from a post node.
+ * Instagram caption formats encountered in the wild:
+ *   1. edge_media_to_caption: { edges: [{ node: { text: '...' } }] }
+ *   2. caption: '...'  (plain string)
+ *   3. caption: { text: '...', created_at: ... }  (object)
+ *   4. accessibility_caption: 'Photo by ...'  (auto-generated — last resort)
  */
 function extractCaption(node) {
     for (const field of CAPTION_FIELDS) {
         const val = node[field];
-        if (typeof val === 'string' && val.length > 0) return val;
-        // edge_media_to_caption pattern: { edges: [{ node: { text } }] }
-        if (val && typeof val === 'object' && Array.isArray(val.edges)) {
+        if (!val) continue;
+
+        // Plain string
+        if (typeof val === 'string' && val.length > 0) {
+            // Skip accessibility_caption if it looks auto-generated
+            if (field === 'accessibility_caption' && /^Photo by /i.test(val)) continue;
+            return val;
+        }
+
+        // edge pattern: { edges: [{ node: { text } }] }
+        if (typeof val === 'object' && Array.isArray(val.edges)) {
             const text = val.edges[0]?.node?.text;
+            if (text && text.length > 0) return text;
+        }
+
+        // object with direct text field: { text: '...', ... }
+        if (typeof val === 'object' && typeof val.text === 'string' && val.text.length > 0) {
+            return val.text;
+        }
+
+        // array of caption objects (some variants)
+        if (Array.isArray(val) && val.length > 0) {
+            const text = val[0]?.text || val[0]?.content || val[0]?.node?.text;
             if (text) return text;
         }
-        // caption as object with text field
-        if (val && typeof val === 'object' && typeof val.text === 'string') return val.text;
     }
     return '';
 }
@@ -245,6 +272,21 @@ function extractId(node) {
 }
 
 /**
+ * Extract the best video URL from a post node (highest quality).
+ */
+function extractVideoUrl(node) {
+    // Prefer video_versions array sorted by quality
+    if (Array.isArray(node.video_versions) && node.video_versions.length > 0) {
+        const sorted = [...node.video_versions].sort((a, b) => (b.width || 0) - (a.width || 0));
+        const url = sorted[0]?.url;
+        if (url) return url;
+    }
+    // Direct video_url field
+    if (typeof node.video_url === 'string' && node.video_url.startsWith('http')) return node.video_url;
+    return null;
+}
+
+/**
  * Parse a raw post node into a normalized post object.
  * Returns null if essential fields (id or timestamp) are missing.
  */
@@ -261,16 +303,21 @@ function normalizePost(node) {
     // Detect post type
     const isVideo = !!(node.is_video || node.video_url || node.video_versions);
     const isCarousel = !!(node.carousel_media || node.sidecar_media || node.__typename === 'GraphSidecar');
+    const mediaType = isCarousel ? 'carousel' : isVideo ? 'video' : 'image';
+
+    const videoUrl = isVideo ? extractVideoUrl(node) : null;
+    // For images use existing extractor; for videos use thumbnail (display_url / poster)
+    const imageUrl = extractImageUrl(node);
 
     return {
         postIdentifier: id,
         postUrl,
-        imageUrl: extractImageUrl(node),
+        imageUrl,
+        videoUrl,
+        mediaType,
         captionText: extractCaption(node),
         comments: extractComments(node),
         publishedAt: extractTimestamp(node),
-        isVideo,
-        isCarousel,
         rawNode: node, // kept briefly for debugging; cleared after processing
     };
 }
@@ -345,10 +392,14 @@ export function attachInterceptor(page, onPost) {
                 if (Array.isArray(carouselSlides) && carouselSlides.length > 1) {
                     logger.info(`[interceptor] Carousel post ${post.postIdentifier}: ${carouselSlides.length} slides`);
                     carouselSlides.forEach((slide, idx) => {
+                        const slideIsVideo = !!(slide.is_video || slide.video_url || slide.video_versions);
                         onPost({
                             ...post,
                             postIdentifier: `${post.postIdentifier}_c${idx + 1}`,
                             imageUrl: extractImageUrl(slide) || post.imageUrl,
+                            videoUrl: slideIsVideo ? extractVideoUrl(slide) : null,
+                            mediaType: slideIsVideo ? 'video' : 'image',
+                            // caption always inherited from parent carousel post
                             rawNode: undefined,
                         });
                     });

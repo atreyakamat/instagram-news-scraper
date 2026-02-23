@@ -33,8 +33,10 @@ const CREATE_POSTS_TABLE = `
     post_identifier    VARCHAR(255) NOT NULL UNIQUE,
     source_url         VARCHAR(500),
     post_url           VARCHAR(500),
+    media_type         VARCHAR(20)  DEFAULT 'image',
     image_url          VARCHAR(2000),
     image_path         VARCHAR(500),
+    video_url          VARCHAR(2000),
     caption_text       TEXT,
     comments_json      JSON,
     published_at       DATETIME,
@@ -79,6 +81,10 @@ export async function initDb({ host, port, user, password, database }) {
 
   await pool.query(CREATE_SESSIONS_TABLE);
   await pool.query(CREATE_POSTS_TABLE);
+
+  // Migrations — add new columns to existing tables without dropping data
+  await pool.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS media_type VARCHAR(20) DEFAULT 'image' AFTER post_url`).catch(() => {});
+  await pool.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url VARCHAR(2000) AFTER image_path`).catch(() => {});
 
   logger.info(`MySQL ready: ${user}@${host}:${port}/${database}`);
   return pool;
@@ -126,16 +132,18 @@ export async function finalizeSession(pool, sessionId, { processed, skipped, err
 export async function insertPost(pool, sessionId, postData) {
   const [result] = await pool.query(
     `INSERT IGNORE INTO posts
-       (scrape_session_id, post_identifier, source_url, post_url, image_url, image_path,
-        caption_text, comments_json, published_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (scrape_session_id, post_identifier, source_url, post_url, media_type,
+        image_url, image_path, video_url, caption_text, comments_json, published_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       sessionId,
       postData.postIdentifier,
       postData.sourceUrl || null,
       postData.postUrl || null,
+      postData.mediaType || 'image',
       postData.imageUrl || null,
       postData.imagePath || null,
+      postData.videoUrl || null,
       postData.captionText || '',
       JSON.stringify(postData.comments || []),
       postData.publishedAt ? postData.publishedAt.toISOString().slice(0, 19).replace('T', ' ') : null,
@@ -152,12 +160,14 @@ export async function insertPost(pool, sessionId, postData) {
 }
 
 /**
- * Get the most recent published_at in the DB (for resumable scraping).
+ * Get the most recent published_at for a specific source URL (for resumable scraping).
+ * Scoped to source_url so scraping account B doesn't block account A's older posts.
  * @returns {Promise<Date|null>}
  */
-export async function getLatestPublishedAt(pool) {
+export async function getLatestPublishedAt(pool, sourceUrl) {
   const [rows] = await pool.query(
-    `SELECT published_at FROM posts ORDER BY published_at DESC LIMIT 1`
+    `SELECT published_at FROM posts WHERE source_url = ? ORDER BY published_at DESC LIMIT 1`,
+    [sourceUrl]
   );
   return rows.length > 0 && rows[0].published_at ? new Date(rows[0].published_at) : null;
 }

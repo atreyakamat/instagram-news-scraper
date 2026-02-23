@@ -23,8 +23,10 @@ function getExtension(imageUrl) {
     try {
         const pathname = new URL(imageUrl).pathname.split('?')[0];
         const ext = extname(pathname).toLowerCase();
-        if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif'].includes(ext)) return ext;
+        if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.mp4', '.mov', '.webm', '.m4v'].includes(ext)) return ext;
     } catch { /* ignore */ }
+    // If the URL contains video CDN patterns, default to .mp4
+    if (/video|\.mp4|cdninstagram.*v=/.test(imageUrl)) return '.mp4';
     return '.jpg';
 }
 
